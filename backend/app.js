@@ -5,8 +5,10 @@ const cors = require('cors'); // Cross-Origin Resource Sharing
 const csurf = require('csurf'); // CSRF protection
 const helmet = require('helmet'); // Security middleware
 const cookieParser = require('cookie-parser'); // Cookie parsing
+const path = require('path'); // Path utilities
 const { restoreUser } = require('./utils/auth'); // Restore user session
 const { ValidationError } = require('sequelize'); // Sequelize error handler
+const routes = require('./routes'); // Routes
 
 const { environment } = require('./config');
 const isProduction = environment === 'production';
@@ -14,10 +16,12 @@ const isProduction = environment === 'production';
 // Initialize Express app
 const app = express();
 
-// Setup logger middleware
+// --- Middleware Setup ---
+
+// Logger middleware
 app.use(morgan('dev'));
 
-// Middleware for parsing cookies and JSON requests
+// Parse cookies and JSON request bodies
 app.use(cookieParser());
 app.use(express.json());
 
@@ -26,49 +30,61 @@ if (!isProduction) {
   app.use(cors());
 }
 
-// Apply security headers with Helmet
+// Security headers with Helmet
 app.use(
   helmet.crossOriginResourcePolicy({
     policy: 'cross-origin',
   })
 );
 
-// Initialize CSRF protection
+// CSRF Protection
 app.use(
   csurf({
     cookie: {
       secure: isProduction, // Secure cookies in production
       sameSite: isProduction ? 'Lax' : 'Strict', // Cross-site handling
-      httpOnly: true, // Prevent JavaScript access to cookies
+      httpOnly: true, // Prevent JS access
     },
   })
 );
 
-// Middleware to include CSRF token in responses (after CSRF initialization)
+// Include CSRF token in cookies
 app.use((req, res, next) => {
   try {
-    const csrfToken = req.csrfToken(); // Generate CSRF token
-    res.cookie('XSRF-TOKEN', csrfToken); // Set token in cookie
-    res.locals.csrfToken = csrfToken; // Optional: Use in templates
+    const csrfToken = req.csrfToken();
+    res.cookie('XSRF-TOKEN', csrfToken); // Set token in cookies
+    res.locals.csrfToken = csrfToken; // Optional for templates
     next();
   } catch (error) {
-    console.error('CSRF Token Error:', error); // Handle CSRF errors gracefully
-    next(error);
+    console.error('CSRF Token Error:', error.message);
+    res.status(500).json({ error: 'Failed to generate CSRF token' });
   }
 });
 
 // Restore user session
 app.use(restoreUser);
 
-// Import and apply routes
-const routes = require('./routes');
-app.use(routes);
+// --- API Routes ---
+app.use('/api', routes);
+
+// --- Serve React Frontend in Production ---
+
+if (isProduction) {
+  // Serve static files from the React frontend's build folder
+  app.use(express.static(path.resolve(__dirname, '../frontend/build')));
+
+  // Serve the React app for all routes except those starting with "/api"
+  app.get(/^(?!\/api).*/, (req, res) => {
+    res.sendFile(path.resolve(__dirname, '../frontend/build', 'index.html'));
+  });
+}
+
+// --- Error Handling ---
 
 // Handle 404 errors for unhandled requests
 app.use((_req, _res, next) => {
   const err = new Error("The requested resource couldn't be found.");
   err.title = 'Resource Not Found';
-  err.errors = { message: "The requested resource couldn't be found." };
   err.status = 404;
   next(err);
 });
@@ -86,14 +102,15 @@ app.use((err, _req, _res, next) => {
   next(err);
 });
 
+// General error handler
 app.use((err, _req, res, _next) => {
   res.status(err.status || 500);
-  console.error(err);
+  console.error('Error:', err.message);
   res.json({
     title: err.title || 'Server Error',
     message: err.message,
-    errors: err.errors,
-    stack: isProduction ? null : err.stack
+    errors: err.errors || {},
+    stack: isProduction ? null : err.stack,
   });
 });
 
