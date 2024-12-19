@@ -1,185 +1,44 @@
-const express = require('express');
-const { Op } = require('sequelize'); // Make sure Op is imported
-const { requireAuth } = require('../../utils/auth');
-const { Booking, Spot, SpotImage } = require('../../db/models');
-const { check } = require('express-validator');
-const { handleValidationErrors } = require('../../utils/validation');
+const CREATE_BOOKING = 'bookings/CREATE_BOOKING';
+const LOAD_BOOKINGS = 'bookings/LOAD_BOOKINGS';
+const UPDATE_BOOKING = 'bookings/UPDATE_BOOKING';
 
-const router = express.Router();
-
-// **Validation middleware for creating/updating bookings**
-const validateBooking = [
-  check('startDate').isISO8601().withMessage('Start date is required'),
-  check('endDate').isISO8601().withMessage('End date is required'),
-  handleValidationErrors
-];
-
-// **Get all bookings of the current user**
-router.get('/current', requireAuth, async (req, res) => {
-  const { user } = req;
-
-  const bookings = await Booking.findAll({
-    where: { userId: user.id },
-    include: [
-      {
-        model: Spot,
-        include: [
-          {
-            model: SpotImage,
-            where: { preview: true },
-            required: false,
-            attributes: ['url']
-          }
-        ],
-        attributes: ['id', 'name', 'address', 'city', 'state', 'country', 'price']
-      }
-    ]
+export const createBooking = (booking) => async (dispatch) => {
+  const response = await csrfFetch('/api/bookings', {
+    method: 'POST',
+    body: JSON.stringify(booking),
   });
+  const newBooking = await response.json();
+  dispatch({ type: CREATE_BOOKING, payload: newBooking });
+  return newBooking; // Return the newly created booking, if needed
+};
 
-  const formattedBookings = bookings.map(booking => ({
-    id: booking.id,
-    spotId: booking.spotId,
-    startDate: booking.startDate,
-    endDate: booking.endDate,
-    Spot: {
-      id: booking.Spot.id,
-      name: booking.Spot.name,
-      address: booking.Spot.address,
-      city: booking.Spot.city,
-      state: booking.Spot.state,
-      country: booking.Spot.country,
-      price: booking.Spot.price,
-      previewImage: booking.Spot.SpotImages?.[0]?.url || null
-    }
-  }));
+export const fetchBookings = () => async (dispatch) => {
+  const response = await csrfFetch('/api/bookings');
+  const bookings = await response.json();
+  dispatch({ type: LOAD_BOOKINGS, payload: bookings });
+};
 
-  return res.json({ Bookings: formattedBookings });
-});
-
-// **Get all bookings for a spot (owner or public view)**
-router.get('/spots/:spotId/bookings', requireAuth, async (req, res) => {
-  const { spotId } = req.params;
-  const { user } = req;
-
-  const spot = await Spot.findByPk(spotId);
-  if (!spot) {
-    return res.status(404).json({ message: "Spot couldn't be found" });
-  }
-
-  const bookings = await Booking.findAll({
-    where: { spotId },
-    attributes: ['id', 'spotId', 'userId', 'startDate', 'endDate']
+export const updateBooking = (bookingId, updatedData) => async (dispatch) => {
+  const response = await csrfFetch(`/api/bookings/${bookingId}`, {
+    method: 'PUT',
+    body: JSON.stringify(updatedData),
   });
+  const updatedBooking = await response.json();
+  dispatch({ type: UPDATE_BOOKING, payload: updatedBooking });
+  return updatedBooking; // Return the updated booking, if needed
+};
 
-  if (spot.ownerId === user.id) {
-    return res.json({ Bookings: bookings });
+export default function reducer(state = [], action) {
+  switch (action.type) {
+    case LOAD_BOOKINGS:
+      return action.payload;
+    case CREATE_BOOKING:
+      return [...state, action.payload]; // Add the new booking to the state
+    case UPDATE_BOOKING:
+      return state.map((booking) =>
+        booking.id === action.payload.id ? action.payload : booking
+      ); // Update the matching booking
+    default:
+      return state;
   }
-
-  const restrictedBookings = bookings.map(booking => ({
-    startDate: booking.startDate,
-    endDate: booking.endDate
-  }));
-
-  return res.json({ Bookings: restrictedBookings });
-});
-
-// **Create a booking**
-router.post('/spots/:spotId/bookings', requireAuth, validateBooking, async (req, res) => {
-  const { spotId } = req.params;
-  const { startDate, endDate } = req.body;
-  const { user } = req;
-
-  const spot = await Spot.findByPk(spotId);
-  if (!spot) {
-    return res.status(404).json({ message: "Spot couldn't be found" });
-  }
-
-  if (spot.ownerId === user.id) {
-    return res.status(403).json({ message: "You cannot book your own spot" });
-  }
-
-  const existingBooking = await Booking.findOne({
-    where: {
-      spotId,
-      startDate: { [Op.lte]: endDate },
-      endDate: { [Op.gte]: startDate }
-    }
-  });
-
-  if (existingBooking) {
-    return res.status(403).json({
-      message: 'Sorry, this spot is already booked for the specified dates',
-      errors: {
-        startDate: 'Start date conflicts with an existing booking',
-        endDate: 'End date conflicts with an existing booking'
-      }
-    });
-  }
-
-  const newBooking = await Booking.create({
-    spotId,
-    userId: user.id,
-    startDate,
-    endDate
-  });
-
-  return res.status(201).json(newBooking);
-});
-
-// **Update a booking**
-router.put('/bookings/:bookingId', requireAuth, validateBooking, async (req, res) => {
-  const { bookingId } = req.params;
-  const { startDate, endDate } = req.body;
-  const { user } = req;
-
-  const booking = await Booking.findByPk(bookingId);
-  if (!booking) {
-    return res.status(404).json({ message: "Booking couldn't be found" });
-  }
-
-  if (booking.userId !== user.id) {
-    return res.status(403).json({ message: 'Forbidden' });
-  }
-
-  const conflictingBooking = await Booking.findOne({
-    where: {
-      spotId: booking.spotId,
-      startDate: { [Op.lte]: endDate },
-      endDate: { [Op.gte]: startDate },
-      id: { [Op.ne]: bookingId }
-    }
-  });
-
-  if (conflictingBooking) {
-    return res.status(403).json({
-      message: 'Sorry, this spot is already booked for the specified dates',
-      errors: {
-        startDate: 'Start date conflicts with an existing booking',
-        endDate: 'End date conflicts with an existing booking'
-      }
-    });
-  }
-
-  await booking.update({ startDate, endDate });
-  return res.json(booking);
-});
-
-// **Delete a booking**
-router.delete('/bookings/:bookingId', requireAuth, async (req, res) => {
-  const { bookingId } = req.params;
-  const { user } = req;
-
-  const booking = await Booking.findByPk(bookingId);
-  if (!booking) {
-    return res.status(404).json({ message: "Booking couldn't be found" });
-  }
-
-  if (booking.userId !== user.id) {
-    return res.status(403).json({ message: 'Forbidden' });
-  }
-
-  await booking.destroy();
-  return res.json({ message: 'Successfully deleted' });
-});
-
-module.exports = router;
+}
